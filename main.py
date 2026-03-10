@@ -87,11 +87,11 @@ class AwesomeStatusBarApp(rumps.App):
         self._schedule_next_capture()
 
     def _schedule_next_capture(self):
-        """Schedule the next screenshot capture after 3 seconds."""
+        """Schedule the next screenshot capture after 1 seconds."""
         if self.capture_timer:
             self.capture_timer.cancel()
 
-        self.capture_timer = threading.Timer(3, self._capture_and_schedule)
+        self.capture_timer = threading.Timer(1, self._capture_and_schedule)
         self.capture_timer.daemon = True
         self.capture_timer.start()
 
