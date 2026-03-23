@@ -4,7 +4,6 @@ import os
 import threading
 import logging
 import sys
-import time
 import re
 from datetime import datetime
 from dotenv import load_dotenv
@@ -80,7 +79,7 @@ def parse_answer_choices(raw_solution: str) -> str:
 def call_gemini_api(gemini_client: genai.Client, image: Image.Image) -> str:
     """Call Gemini API with the given client and image."""
     response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3-flash-preview",
         contents=[GRADING_PROMPT, image],
     )
     return response.text or ""
@@ -93,7 +92,7 @@ class AwesomeStatusBarApp(rumps.App):
         self.actual_answer = "?"
         self.show_answer = False
         self.lock = threading.Lock()
-        self.capture_timer = None
+        self.left_ctrl_pressed = False
 
         # Create screenshots folder if it doesn't exist
         self.screenshots_dir = os.path.join(os.getcwd(), "screenshots")
@@ -111,20 +110,6 @@ class AwesomeStatusBarApp(rumps.App):
         # Start keyboard listener for shift key detection
         self._start_keyboard_listener()
 
-        # Add 1 seconds delay since initialization before scheduling the first capture
-        time.sleep(1)
-        # Start the first capture after the delay
-        self._schedule_next_capture()
-
-    def _schedule_next_capture(self):
-        """Schedule the next screenshot capture after 1 seconds."""
-        if self.capture_timer:
-            self.capture_timer.cancel()
-
-        self.capture_timer = threading.Timer(1, self._capture_and_schedule)
-        self.capture_timer.daemon = True
-        self.capture_timer.start()
-
     def _update_title(self):
         """Update menu bar title based on show_answer state."""
         with self.lock:
@@ -134,24 +119,29 @@ class AwesomeStatusBarApp(rumps.App):
                 self.title = "20ºC"
 
     def _start_keyboard_listener(self):
-        """Start a keyboard listener to detect shift key presses."""
+        """Start a keyboard listener for shift visibility and left-control capture."""
 
         def on_press(key):
             if key == keyboard.Key.shift or key == keyboard.Key.shift_r:
                 self.show_answer = True
                 self._update_title()
+            elif key == keyboard.Key.ctrl_l and not self.left_ctrl_pressed:
+                self.left_ctrl_pressed = True
+                self._trigger_capture()
 
         def on_release(key):
             if key == keyboard.Key.shift or key == keyboard.Key.shift_r:
                 self.show_answer = False
                 self._update_title()
+            elif key == keyboard.Key.ctrl_l:
+                self.left_ctrl_pressed = False
 
         listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         listener.daemon = True
         listener.start()
 
-    def _capture_and_schedule(self):
-        """Capture a screenshot and schedule the next one."""
+    def _trigger_capture(self):
+        """Capture a screenshot in a background thread when triggered by hotkey."""
         thread = threading.Thread(target=self._take_screenshot, daemon=True)
         thread.start()
 
@@ -237,9 +227,6 @@ class AwesomeStatusBarApp(rumps.App):
         except Exception as e:
             logger.error(f"Exception during screenshot capture: {e}")
             sys.exit(1)
-        finally:
-            # Schedule the next capture after this one completes
-            self._schedule_next_capture()
 
 
 if __name__ == "__main__":
