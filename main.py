@@ -24,6 +24,9 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 # Secondary API key for fallback
 SECONDARY_API_KEY = os.getenv("GEMINI_API_KEY_SECONDARY")
 
+PRIMARY_MODEL = "gemini-3-flash-preview"
+FALLBACK_MODEL = "gemini-2.5-flash"
+
 # System prompt for the grading agent
 GRADING_PROMPT = """
 You are a specialized grading agent. Your only function is to output uppercase answer choices only, with no explanation, punctuation, or extra text.
@@ -76,10 +79,10 @@ def parse_answer_choices(raw_solution: str) -> str:
     return "?"
 
 
-def call_gemini_api(gemini_client: genai.Client, image: Image.Image) -> str:
-    """Call Gemini API with the given client and image."""
+def call_gemini_api(gemini_client: genai.Client, image: Image.Image, model: str) -> str:
+    """Call Gemini API with the given client, image, and model."""
     response = gemini_client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model=model,
         contents=[GRADING_PROMPT, image],
     )
     return response.text or ""
@@ -146,55 +149,46 @@ class AwesomeStatusBarApp(rumps.App):
         thread.start()
 
     def _analyze_screenshot_with_gemini(self, filepath: str) -> str:
-        """Analyze screenshot using Gemini 2.5 Flash API."""
+        """Analyze screenshot using Gemini with model/API-key fallback layers."""
         try:
-            # Load image with Pillow
             image = Image.open(filepath)
-
-            # Call Gemini 2.5 Flash API using the primary client
-            solution = call_gemini_api(client, image)
-
-            # Print full solution to console with context
-            print(
-                f"\n[{datetime.now().isoformat()}] Screenshot: {os.path.basename(filepath)}"
-            )
-            print(f"Solution: {solution}\n")
-
-            # Normalize response for single-answer and multi-answer questions
-            return parse_answer_choices(solution)
-
         except Exception as e:
-            logger.error(f"Gemini API analysis failed with primary key: {e}")
+            logger.error(f"Failed to open screenshot image: {e}")
+            sys.exit(1)
 
-            # Try with secondary API key if available
-            if SECONDARY_API_KEY:
-                try:
-                    logger.info("Attempting analysis with secondary API key...")
-                    secondary_client = genai.Client(api_key=SECONDARY_API_KEY)
+        secondary_client = genai.Client(api_key=SECONDARY_API_KEY) if SECONDARY_API_KEY else None
 
-                    # Load image again
-                    image = Image.open(filepath)
+        # Fallback order:
+        # 1) gemini-3-flash-preview + primary key
+        # 2) gemini-3-flash-preview + secondary key
+        # 3) gemini-2.5-flash + primary key
+        # 4) gemini-2.5-flash + secondary key
+        attempts = [
+            (PRIMARY_MODEL, client, "primary API key"),
+            (PRIMARY_MODEL, secondary_client, "secondary API key"),
+            (FALLBACK_MODEL, client, "primary API key"),
+            (FALLBACK_MODEL, secondary_client, "secondary API key"),
+        ]
 
-                    # Call Gemini 2.5 Flash API using the secondary client
-                    solution = call_gemini_api(secondary_client, image)
+        for model, attempt_client, key_label in attempts:
+            if attempt_client is None:
+                continue
 
-                    # Print full solution to console with context
-                    print(
-                        f"\n[{datetime.now().isoformat()}] Screenshot: {os.path.basename(filepath)} (using secondary API key)"
-                    )
-                    print(f"Solution: {solution}\n")
+            try:
+                solution = call_gemini_api(attempt_client, image, model)
 
-                    # Normalize response for single-answer and multi-answer questions
-                    return parse_answer_choices(solution)
+                print(
+                    f"\n[{datetime.now().isoformat()}] Screenshot: {os.path.basename(filepath)}"
+                )
+                print(f"Model: {model} ({key_label})")
+                print(f"Solution: {solution}\n")
 
-                except Exception as secondary_e:
-                    logger.error(
-                        f"Gemini API analysis also failed with secondary key: {secondary_e}"
-                    )
-                    sys.exit(1)
-            else:
-                logger.error("No secondary API key available for fallback")
-                sys.exit(1)
+                return parse_answer_choices(solution)
+            except Exception as e:
+                logger.error(f"Gemini API analysis failed for {model} with {key_label}: {e}")
+
+        logger.error("Gemini API analysis failed for all fallback layers")
+        sys.exit(1)
 
     def _take_screenshot(self):
         """Execute screencapture command in a non-blocking manner."""
