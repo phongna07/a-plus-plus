@@ -29,54 +29,88 @@ FALLBACK_MODEL = "gemini-2.5-flash"
 
 # System prompt for the grading agent
 GRADING_PROMPT = """
-You are a specialized grading agent. Your only function is to output uppercase answer choices only, with no explanation, punctuation, or extra text.
+You are a specialized grading agent.
 
 Task:
 
 Analyze the provided screenshot of a computer screen.
 
-Identify the first complete multiple-choice question that appears on the screen.
+Identify the first complete answerable question that appears on the screen.
 
 The question may be either:
-- single-answer (radio style), or
-- multiple-answer (checkbox style, select all that apply).
+- multiple-choice (single answer or multiple answers), or
+- short text / numeric answer.
 
-Based only on the screenshot, determine the correct answer choice(s) for that first complete question.
+Based only on the screenshot, determine the correct answer for that first complete question.
 
-Output Rules:
+Output Rules (strict):
 
-- If the question has one correct choice, output one uppercase letter (A-F), for example: B
-- If the question has multiple correct choices, output all correct uppercase letters in alphabetical order with no separators, for example: AC or BDF
-- If no complete multiple-choice question is found, output exactly: ?
+- If the question is multiple-choice with one correct choice, output one uppercase letter (A-F), for example: B
+- If the question is multiple-choice with multiple correct choices, output all correct uppercase letters in alphabetical order with no separators, for example: AC or BDF
+- If the question expects a short text or numeric response, output only the final short answer text (for example: 9.8 m/s, mitochondria, 42)
+- Do not include explanations, reasoning, labels, markdown, or extra punctuation
+- If no complete answerable question is found, output exactly: ?
 
-Remember: Output only the answer token(s).
+Remember: Output only the answer itself.
 
 Here is the screenshot:"""
 
 
-def parse_answer_choices(raw_solution: str) -> str:
-    """Normalize model output to '?' or one/more uppercase choices (A-F)."""
+def parse_answer(raw_solution: str) -> str:
+    """Normalize model output to '?' or a compact multiple-choice/text answer."""
     if not raw_solution:
         return "?"
 
-    cleaned = raw_solution.strip().upper()
+    cleaned = raw_solution.strip()
     if not cleaned:
         return "?"
 
     if cleaned == "?":
         return "?"
 
+    # Remove markdown fences and surrounding quotes/backticks.
+    cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\n|\n```$", "", cleaned.strip())
+    cleaned = cleaned.strip().strip("`\"'")
+    if not cleaned:
+        return "?"
+
+    # Use the first non-empty line to avoid trailing explanation if the model drifts.
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    candidate = lines[0] if lines else ""
+    if not candidate:
+        return "?"
+
+    # Common label cleanup for short-answer outputs.
+    candidate = re.sub(
+        r"^(final\s+answer|answer|short\s+answer|text)\s*[:\-]\s*",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if candidate == "?":
+        return "?"
+
+    mc_upper = candidate.upper()
+
     # Preferred format: standalone choice tokens such as "A", "A C", or "A, C".
-    token_matches = re.findall(r"\b([A-F])\b", cleaned)
+    token_matches = re.findall(r"\b([A-F])\b", mc_upper)
     if token_matches:
         return "".join(sorted(set(token_matches)))
 
-    # Fallback: compact format such as "AC".
-    compact = re.sub(r"[^A-F]", "", cleaned)
-    if compact:
-        return "".join(sorted(set(compact)))
+    # Fallback: compact format such as "AC" (only if candidate is letters/separators).
+    if re.fullmatch(r"[A-F\s,;/]+", mc_upper):
+        compact = re.sub(r"[^A-F]", "", mc_upper)
+        if compact:
+            return "".join(sorted(set(compact)))
 
-    return "?"
+    # Treat non-MC output as short text answer; trim trailing punctuation and cap length.
+    text_answer = re.sub(r"\s+", " ", candidate).strip()
+    text_answer = re.sub(r"[\s\.,;:]+$", "", text_answer)
+    if not text_answer:
+        return "?"
+
+    return text_answer[:80]
 
 
 def call_gemini_api(gemini_client: genai.Client, image: Image.Image, model: str) -> str:
@@ -117,7 +151,7 @@ class AwesomeStatusBarApp(rumps.App):
         """Update menu bar title based on show_answer state."""
         with self.lock:
             if self.show_answer:
-                self.title = f"{self.screenshot_count}{self.actual_answer}"
+                self.title = f"{self.screenshot_count}){self.actual_answer}"
             else:
                 self.title = "20ºC"
 
@@ -183,7 +217,7 @@ class AwesomeStatusBarApp(rumps.App):
                 print(f"Model: {model} ({key_label})")
                 print(f"Solution: {solution}\n")
 
-                return parse_answer_choices(solution)
+                return parse_answer(solution)
             except Exception as e:
                 logger.error(f"Gemini API analysis failed for {model} with {key_label}: {e}")
 
