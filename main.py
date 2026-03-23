@@ -5,6 +5,7 @@ import threading
 import logging
 import sys
 import time
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 from google import genai
@@ -26,7 +27,7 @@ SECONDARY_API_KEY = os.getenv("GEMINI_API_KEY_SECONDARY")
 
 # System prompt for the grading agent
 GRADING_PROMPT = """
-You are a specialized grading agent. Your only function is to output a single, uppercase character that represents the correct answer choice. You must provide no other text, explanation, or punctuation.
+You are a specialized grading agent. Your only function is to output uppercase answer choices only, with no explanation, punctuation, or extra text.
 
 Task:
 
@@ -34,17 +35,46 @@ Analyze the provided screenshot of a computer screen.
 
 Identify the first complete multiple-choice question that appears on the screen.
 
-Based only on the content of the screenshot, determine the correct answer for that question.
+The question may be either:
+- single-answer (radio style), or
+- multiple-answer (checkbox style, select all that apply).
+
+Based only on the screenshot, determine the correct answer choice(s) for that first complete question.
 
 Output Rules:
 
-Respond with the single uppercase letter of the correct answer (e.g., 'A', 'B', 'C', 'D', 'E', or 'F').
+- If the question has one correct choice, output one uppercase letter (A-F), for example: B
+- If the question has multiple correct choices, output all correct uppercase letters in alphabetical order with no separators, for example: AC or BDF
+- If no complete multiple-choice question is found, output exactly: ?
 
-If no multiple-choice question is found, your single and only output must be the question mark ('?').
-
-Remember: Output only the single character.
+Remember: Output only the answer token(s).
 
 Here is the screenshot:"""
+
+
+def parse_answer_choices(raw_solution: str) -> str:
+    """Normalize model output to '?' or one/more uppercase choices (A-F)."""
+    if not raw_solution:
+        return "?"
+
+    cleaned = raw_solution.strip().upper()
+    if not cleaned:
+        return "?"
+
+    if cleaned == "?":
+        return "?"
+
+    # Preferred format: standalone choice tokens such as "A", "A C", or "A, C".
+    token_matches = re.findall(r"\b([A-F])\b", cleaned)
+    if token_matches:
+        return "".join(sorted(set(token_matches)))
+
+    # Fallback: compact format such as "AC".
+    compact = re.sub(r"[^A-F]", "", cleaned)
+    if compact:
+        return "".join(sorted(set(compact)))
+
+    return "?"
 
 
 def call_gemini_api(gemini_client: genai.Client, image: Image.Image) -> str:
@@ -140,8 +170,8 @@ class AwesomeStatusBarApp(rumps.App):
             )
             print(f"Solution: {solution}\n")
 
-            # Return first character
-            return solution[0] if solution else "?"
+            # Normalize response for single-answer and multi-answer questions
+            return parse_answer_choices(solution)
 
         except Exception as e:
             logger.error(f"Gemini API analysis failed with primary key: {e}")
@@ -164,8 +194,8 @@ class AwesomeStatusBarApp(rumps.App):
                     )
                     print(f"Solution: {solution}\n")
 
-                    # Return first character
-                    return solution[0] if solution else "?"
+                    # Normalize response for single-answer and multi-answer questions
+                    return parse_answer_choices(solution)
 
                 except Exception as secondary_e:
                     logger.error(
